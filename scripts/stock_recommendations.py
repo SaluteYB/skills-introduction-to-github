@@ -111,6 +111,14 @@ def get_trending_symbols(top_n: int = 20) -> list[str]:
         s for s, _ in counter.most_common()
         if re.match(r'^[A-Z]{1,5}$', s)
     ]
+
+    if not ranked:
+        # 备用：当所有 API 均不可用时，使用固定热门股票
+        print("[INFO] 所有数据源不可用，使用备用股票列表。", file=sys.stderr)
+        ranked = ["NVDA", "TSLA", "AAPL", "META", "MSFT",
+                  "AMZN", "GOOGL", "AMD", "PLTR", "SOFI",
+                  "MARA", "RIOT", "COIN", "HOOD", "RBLX"]
+
     return ranked[:top_n]
 
 
