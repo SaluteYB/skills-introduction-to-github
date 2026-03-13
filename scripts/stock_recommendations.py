@@ -1,43 +1,138 @@
 #!/usr/bin/env python3
 """
-美股每日推荐脚本
-每天早上 9 点（北京时间）自动运行，生成推荐并创建 GitHub Issue
+Daily Stock Pick — TikTok FinTok 热门股票推荐
+数据来源：StockTwits trending + Yahoo Finance trending + Reddit WSB
+每天早上 6:06 北京时间自动运行，生成推荐并创建 GitHub Issue
 """
 
-import json
 import os
+import re
 import sys
+from collections import Counter
 from datetime import datetime, timezone, timedelta
 
 import requests
 import yfinance as yf
 
-# ── 推荐池：可自由增减 ──────────────────────────────────────────────────
-WATCHLIST = {
-    "科技": ["AAPL", "MSFT", "GOOGL", "NVDA", "META", "AMZN", "TSLA"],
-    "金融": ["JPM", "BAC", "GS", "V", "MA"],
-    "消费": ["MCD", "SBUX", "NKE", "COST"],
-    "医疗": ["JNJ", "UNH", "PFE", "ABBV"],
-    "ETF":  ["SPY", "QQQ", "ARKK", "XLF", "XLK"],
-}
-
 CST = timezone(timedelta(hours=8))
 
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    )
+}
 
-def fetch_ticker_data(symbol: str) -> dict | None:
-    """拉取单只股票数据，计算简单技术指标。"""
+# ── 数据源 1：StockTwits Trending ────────────────────────────────────────────
+def fetch_stocktwits_trending() -> list[str]:
+    """StockTwits 实时热门 ticker（对标 TikTok FinTok 话题）。"""
+    url = "https://api.stocktwits.com/api/2/trending/symbols.json"
     try:
-        tk = yf.Ticker(symbol)
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+        symbols = [s["symbol"] for s in resp.json().get("symbols", [])]
+        print(f"  StockTwits trending: {symbols}")
+        return symbols
+    except Exception as e:
+        print(f"[WARN] StockTwits 失败: {e}", file=sys.stderr)
+        return []
+
+
+# ── 数据源 2：Yahoo Finance Trending ────────────────────────────────────────
+def fetch_yahoo_trending() -> list[str]:
+    """Yahoo Finance 热门 ticker。"""
+    url = "https://query1.finance.yahoo.com/v1/finance/trending/US?count=20"
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+        quotes = (
+            resp.json()
+            .get("finance", {})
+            .get("result", [{}])[0]
+            .get("quotes", [])
+        )
+        symbols = [q["symbol"] for q in quotes if "." not in q.get("symbol", ".")]
+        print(f"  Yahoo trending:      {symbols}")
+        return symbols
+    except Exception as e:
+        print(f"[WARN] Yahoo trending 失败: {e}", file=sys.stderr)
+        return []
+
+
+# ── 数据源 3：Reddit r/wallstreetbets 热词 ───────────────────────────────────
+_TICKER_RE = re.compile(r'\b([A-Z]{2,5})\b')
+_IGNORE = {
+    "A", "I", "AM", "IT", "AT", "BE", "DO", "GO", "IF", "IN", "IS", "ME",
+    "MY", "NO", "OF", "ON", "OR", "SO", "TO", "UP", "US", "WE", "AI",
+    "DD", "EV", "FD", "GG", "OP", "OG", "PM", "TD", "THE", "CEO", "IPO",
+    "ETF", "ATH", "SEC", "IRS", "GDP", "IMO", "LOL", "WTF", "EOD", "AH",
+    "DRS", "GME", "AMC",   # 留着 GME / AMC 太老，可视情况移除
+}
+
+def fetch_wsb_trending() -> list[str]:
+    """从 Reddit WSB 热帖标题中提取高频 ticker。"""
+    url = "https://www.reddit.com/r/wallstreetbets/hot.json?limit=50"
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+        posts = resp.json()["data"]["children"]
+        counter: Counter = Counter()
+        for p in posts:
+            text = p["data"]["title"] + " " + p["data"].get("selftext", "")
+            for m in _TICKER_RE.findall(text):
+                if m not in _IGNORE:
+                    counter[m] += 1
+        symbols = [s for s, _ in counter.most_common(15)]
+        print(f"  WSB hot tickers:     {symbols}")
+        return symbols
+    except Exception as e:
+        print(f"[WARN] Reddit WSB 失败: {e}", file=sys.stderr)
+        return []
+
+
+# ── 合并热度排名 ─────────────────────────────────────────────────────────────
+def get_trending_symbols(top_n: int = 20) -> list[str]:
+    """
+    三个来源加权合并：StockTwits × 3，Yahoo × 2，WSB × 1
+    模拟 TikTok FinTok 热度排行
+    """
+    counter: Counter = Counter()
+
+    for sym in fetch_stocktwits_trending():
+        counter[sym] += 3
+    for sym in fetch_yahoo_trending():
+        counter[sym] += 2
+    for sym in fetch_wsb_trending():
+        counter[sym] += 1
+
+    # 过滤非美股 / 异常符号
+    ranked = [
+        s for s, _ in counter.most_common()
+        if re.match(r'^[A-Z]{1,5}$', s)
+    ]
+    return ranked[:top_n]
+
+
+# ── 技术面分析 ───────────────────────────────────────────────────────────────
+def analyze(symbol: str) -> dict | None:
+    try:
+        tk   = yf.Ticker(symbol)
         hist = tk.history(period="60d")
         if hist.empty or len(hist) < 20:
             return None
 
-        info = tk.fast_info
+        info  = tk.fast_info
         close = hist["Close"]
-        price = float(close.iloc[-1])
-        prev  = float(close.iloc[-2])
-        ma20  = float(close.tail(20).mean())
-        ma5   = float(close.tail(5).mean())
+        vol   = hist["Volume"]
+
+        price    = float(close.iloc[-1])
+        prev     = float(close.iloc[-2])
+        ma20     = float(close.tail(20).mean())
+        ma5      = float(close.tail(5).mean())
+        avg_vol  = float(vol.tail(20).mean())
+        cur_vol  = float(vol.iloc[-1])
+        vol_ratio = cur_vol / avg_vol if avg_vol else 1
 
         # RSI-14
         delta = close.diff().dropna()
@@ -48,20 +143,16 @@ def fetch_ticker_data(symbol: str) -> dict | None:
         change_pct = (price - prev) / prev * 100
         vs_ma20    = (price - ma20) / ma20 * 100
 
-        # 简单打分：RSI 超卖+价格站上均线 → 买入信号
+        # ── 综合评分（满分 6）──
         score = 0
-        if rsi < 35:
-            score += 2
-        elif rsi < 45:
-            score += 1
-        if price > ma20:
-            score += 1
-        if ma5 > ma20:
-            score += 1
-        if change_pct > 0:
-            score += 1
+        if rsi < 35:           score += 2   # 超卖
+        elif rsi < 45:         score += 1
+        if price > ma20:       score += 1   # 站上均线
+        if ma5 > ma20:         score += 1   # 短期动能
+        if vol_ratio > 1.5:    score += 1   # 成交量放大（社媒热度催化）
+        if change_pct > 0:     score += 1
 
-        signal = "🟢 买入" if score >= 4 else ("🟡 持有" if score >= 2 else "🔴 观望")
+        signal = "🟢 买入" if score >= 5 else ("🟡 持有" if score >= 3 else "🔴 观望")
 
         return {
             "symbol":     symbol,
@@ -70,110 +161,128 @@ def fetch_ticker_data(symbol: str) -> dict | None:
             "ma20":       round(ma20, 2),
             "rsi":        round(rsi, 1),
             "vs_ma20":    round(vs_ma20, 2),
+            "vol_ratio":  round(vol_ratio, 2),
             "score":      score,
             "signal":     signal,
         }
     except Exception as e:
-        print(f"[WARN] {symbol} 数据获取失败: {e}", file=sys.stderr)
+        print(f"[WARN] {symbol} 分析失败: {e}", file=sys.stderr)
         return None
 
 
-def build_report(results_by_sector: dict) -> str:
-    """生成 Markdown 格式的推荐报告。"""
+# ── 报告生成 ─────────────────────────────────────────────────────────────────
+def build_report(results: list[dict], raw_trending: list[str]) -> str:
     now = datetime.now(CST)
     lines = [
-        f"# 📈 美股每日推荐 — {now.strftime('%Y-%m-%d')}",
-        f"> 生成时间：{now.strftime('%Y-%m-%d %H:%M')} CST\n",
+        f"# 📈 Daily Stock Pick — {now.strftime('%Y-%m-%d')}",
+        f"> 生成时间：{now.strftime('%Y-%m-%d %H:%M')} CST  "
+        f"· 数据来源：StockTwits / Yahoo Finance / Reddit WSB（对标 TikTok FinTok 热榜）\n",
         "---",
-        "## 说明",
-        "- **评分** 满分 5 分，≥4 🟢买入，≥2 🟡持有，其余 🔴观望",
-        "- **RSI** < 35 超卖区间，> 70 超买区间",
-        "- 本报告仅供参考，不构成投资建议\n",
+        "## 🔥 今日社媒热门 Ticker（原始榜单）",
+        "```",
+        "  ".join(raw_trending),
+        "```\n",
         "---",
+        "## 📊 技术面分析\n",
+        "| 排名 | 代码 | 现价 | 涨跌 | RSI | 均线偏离 | 量比 | 信号 | 评分 |",
+        "|:----:|------|-----:|-----:|----:|--------:|-----:|------|:----:|",
     ]
 
     top_picks = []
+    for i, d in enumerate(results, 1):
+        lines.append(
+            f"| {i} "
+            f"| **{d['symbol']}** "
+            f"| ${d['price']} "
+            f"| {'+' if d['change_pct'] >= 0 else ''}{d['change_pct']}% "
+            f"| {d['rsi']} "
+            f"| {'+' if d['vs_ma20'] >= 0 else ''}{d['vs_ma20']}% "
+            f"| {d['vol_ratio']}x "
+            f"| {d['signal']} "
+            f"| {d['score']}/6 |"
+        )
+        if d["score"] >= 5:
+            top_picks.append(d)
 
-    for sector, items in results_by_sector.items():
-        if not items:
-            continue
-        lines.append(f"\n## {sector}\n")
-        lines.append("| 代码 | 现价 | 涨跌 | RSI | 均线偏离 | 信号 | 评分 |")
-        lines.append("|------|-----:|-----:|----:|--------:|------|:----:|")
-        for d in sorted(items, key=lambda x: -x["score"]):
-            lines.append(
-                f"| **{d['symbol']}** "
-                f"| ${d['price']} "
-                f"| {'+' if d['change_pct'] >= 0 else ''}{d['change_pct']}% "
-                f"| {d['rsi']} "
-                f"| {'+' if d['vs_ma20'] >= 0 else ''}{d['vs_ma20']}% "
-                f"| {d['signal']} "
-                f"| {d['score']}/5 |"
-            )
-            if d["score"] >= 4:
-                top_picks.append(d)
-
+    lines.append("\n---\n## ⭐ 今日精选 Pick\n")
     if top_picks:
-        lines.append("\n---\n## ⭐ 今日重点关注\n")
         for d in sorted(top_picks, key=lambda x: -x["score"]):
             lines.append(
-                f"- **{d['symbol']}**  现价 ${d['price']}，"
-                f"RSI {d['rsi']}，评分 {d['score']}/5  {d['signal']}"
+                f"### {d['symbol']}  {d['signal']}\n"
+                f"- 现价：**${d['price']}**，当日 {'+' if d['change_pct'] >= 0 else ''}{d['change_pct']}%\n"
+                f"- RSI：{d['rsi']}{'（超卖区间 ⚡）' if d['rsi'] < 35 else ''}\n"
+                f"- 偏离 MA20：{'+' if d['vs_ma20'] >= 0 else ''}{d['vs_ma20']}%\n"
+                f"- 成交量比：{d['vol_ratio']}x 均量\n"
+                f"- 综合评分：**{d['score']}/6**\n"
             )
     else:
-        lines.append("\n---\n## ⭐ 今日重点关注\n")
-        lines.append("- 今日暂无强买入信号，建议观望或持仓等待。")
+        best = sorted(results, key=lambda x: -x["score"])[:3]
+        lines.append("今日暂无强买入信号（评分 < 5），观察候选：\n")
+        for d in best:
+            lines.append(f"- **{d['symbol']}**  {d['signal']}  评分 {d['score']}/6")
 
-    lines.append("\n---")
-    lines.append("*数据来源：Yahoo Finance · 自动生成，请结合基本面独立判断*")
+    lines += [
+        "\n---",
+        "## 说明",
+        "- **评分 6 分制**：RSI 超卖 +2、站上 MA20 +1、短期动能 +1、量比 >1.5x +1、当日上涨 +1",
+        "- **量比 >1.5x**：社媒热度催化，成交放量",
+        "- *本报告仅供学习参考，不构成投资建议*",
+    ]
     return "\n".join(lines)
 
 
+# ── 创建 GitHub Issue ────────────────────────────────────────────────────────
 def create_github_issue(title: str, body: str) -> None:
-    """通过 GitHub REST API 创建 Issue。"""
     token = os.environ.get("GITHUB_TOKEN")
     repo  = os.environ.get("GITHUB_REPOSITORY")
     if not token or not repo:
-        print("缺少 GITHUB_TOKEN 或 GITHUB_REPOSITORY，跳过创建 Issue。")
+        print("缺少 GITHUB_TOKEN / GITHUB_REPOSITORY，打印报告：")
         print(body)
         return
 
-    url  = f"https://api.github.com/repos/{repo}/issues"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    payload = {
-        "title":  title,
-        "body":   body,
-        "labels": ["stock-report", "automated"],
-    }
-    resp = requests.post(url, headers=headers, json=payload, timeout=30)
+    resp = requests.post(
+        f"https://api.github.com/repos/{repo}/issues",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        json={"title": title, "body": body, "labels": ["stock-report", "automated"]},
+        timeout=30,
+    )
     if resp.status_code == 201:
-        data = resp.json()
-        print(f"✅ Issue 已创建: {data['html_url']}")
+        print(f"✅ Issue 已创建: {resp.json()['html_url']}")
     else:
         print(f"❌ 创建 Issue 失败 ({resp.status_code}): {resp.text}", file=sys.stderr)
         sys.exit(1)
 
 
+# ── 主流程 ───────────────────────────────────────────────────────────────────
 def main():
-    print("⏳ 开始拉取行情数据...")
-    results_by_sector = {}
-    for sector, symbols in WATCHLIST.items():
-        items = []
-        for sym in symbols:
-            data = fetch_ticker_data(sym)
-            if data:
-                items.append(data)
-                print(f"  {sym}: ${data['price']}  RSI={data['rsi']}  {data['signal']}")
-        results_by_sector[sector] = items
+    print("🔍 正在抓取社媒热门 Ticker（对标 TikTok FinTok）...")
+    trending = get_trending_symbols(top_n=20)
+    if not trending:
+        print("❌ 未获取到任何热门 ticker，退出。", file=sys.stderr)
+        sys.exit(1)
 
-    report = build_report(results_by_sector)
+    print(f"\n📋 共 {len(trending)} 只候选，开始技术面分析...")
+    results = []
+    for sym in trending:
+        data = analyze(sym)
+        if data:
+            results.append(data)
+            print(f"  {sym:6s}  ${data['price']}  RSI={data['rsi']}  {data['signal']}")
 
-    now   = datetime.now(CST)
-    title = f"📈 美股推荐 {now.strftime('%Y-%m-%d')}"
+    if not results:
+        print("❌ 所有 ticker 数据获取失败。", file=sys.stderr)
+        sys.exit(1)
+
+    # 按综合评分排序
+    results.sort(key=lambda x: -x["score"])
+
+    report = build_report(results, trending)
+    now    = datetime.now(CST)
+    title  = f"📈 Daily Stock Pick {now.strftime('%Y-%m-%d')} — TikTok FinTok 热榜精选"
     create_github_issue(title, report)
 
 
