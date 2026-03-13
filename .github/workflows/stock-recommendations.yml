@@ -1,0 +1,44 @@
+name: 📈 美股每日推荐
+
+on:
+  # 每天 01:00 UTC = 09:00 北京时间
+  schedule:
+    - cron: "0 1 * * *"
+  # 也可手动触发，方便测试
+  workflow_dispatch:
+
+jobs:
+  stock-report:
+    name: 生成并推送美股推荐
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write   # 允许创建 Issue
+      contents: read
+
+    steps:
+      - name: Checkout 代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          pip install --upgrade pip
+          pip install yfinance requests
+
+      - name: 运行推荐脚本
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python scripts/stock_recommendations.py
+
+      - name: 确保 Issue 标签存在
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create "stock-report" --color "0075ca" --description "自动生成的美股推荐报告" --force
+          gh label create "automated"    --color "e4e669" --description "由 GitHub Actions 自动创建" --force
