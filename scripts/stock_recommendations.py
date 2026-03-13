@@ -231,29 +231,42 @@ def build_report(results: list[dict], raw_trending: list[str]) -> str:
     return "\n".join(lines)
 
 
-# ── 创建 GitHub Issue ────────────────────────────────────────────────────────
-def create_github_issue(title: str, body: str) -> None:
-    token = os.environ.get("GITHUB_TOKEN")
-    repo  = os.environ.get("GITHUB_REPOSITORY")
-    if not token or not repo:
-        print("缺少 GITHUB_TOKEN / GITHUB_REPOSITORY，打印报告：")
-        print(body)
+# ── 发送邮件 ─────────────────────────────────────────────────────────────────
+def send_email(subject: str, body_md: str) -> None:
+    """用 Gmail SMTP 发送 HTML 邮件（Markdown → HTML）。"""
+    import smtplib
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+
+    sender   = os.environ.get("EMAIL_FROM")
+    password = os.environ.get("EMAIL_PASSWORD")
+    receiver = os.environ.get("EMAIL_TO")
+
+    if not all([sender, password, receiver]):
+        print("⚠️  未配置邮件环境变量，直接打印报告：")
+        print(body_md)
         return
 
-    resp = requests.post(
-        f"https://api.github.com/repos/{repo}/issues",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
-        json={"title": title, "body": body, "labels": ["stock-report", "automated"]},
-        timeout=30,
-    )
-    if resp.status_code == 201:
-        print(f"✅ Issue 已创建: {resp.json()['html_url']}")
-    else:
-        print(f"❌ 创建 Issue 失败 ({resp.status_code}): {resp.text}", file=sys.stderr)
+    # 将 Markdown 转成简单 HTML（保留换行和粗体）
+    html = body_md
+    html = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', html)
+    html = html.replace("\n", "<br>\n")
+    html = f"<html><body style='font-family:monospace'>\n{html}\n</body></html>"
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"]    = sender
+    msg["To"]      = receiver
+    msg.attach(MIMEText(body_md, "plain", "utf-8"))
+    msg.attach(MIMEText(html,    "html",  "utf-8"))
+
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+            smtp.login(sender, password)
+            smtp.sendmail(sender, receiver, msg.as_string())
+        print(f"✅ 邮件已发送至 {receiver}")
+    except Exception as e:
+        print(f"❌ 邮件发送失败: {e}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -283,7 +296,7 @@ def main():
     report = build_report(results, trending)
     now    = datetime.now(CST)
     title  = f"📈 Daily Stock Pick {now.strftime('%Y-%m-%d')} — TikTok FinTok 热榜精选"
-    create_github_issue(title, report)
+    send_email(title, report)
 
 
 if __name__ == "__main__":

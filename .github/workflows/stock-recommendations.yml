@@ -9,10 +9,9 @@ on:
 
 jobs:
   stock-report:
-    name: 抓取 TikTok 热榜 → 技术分析 → 推送报告
+    name: 抓取 TikTok 热榜 → 技术分析 → 发送邮件
     runs-on: ubuntu-latest
     permissions:
-      issues: write   # 允许创建 Issue
       contents: read
 
     steps:
@@ -30,15 +29,9 @@ jobs:
           pip install --upgrade pip
           pip install yfinance requests
 
-      - name: 运行推荐脚本
+      - name: 运行推荐脚本并发送邮件
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
+          EMAIL_FROM:     ${{ secrets.EMAIL_FROM }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_TO:       ${{ secrets.EMAIL_TO }}
         run: python scripts/stock_recommendations.py
-
-      - name: 确保 Issue 标签存在
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh label create "stock-report" --color "0075ca" --description "自动生成的美股推荐报告" --force
-          gh label create "automated"    --color "e4e669" --description "由 GitHub Actions 自动创建" --force
