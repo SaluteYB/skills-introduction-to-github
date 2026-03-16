@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
 Daily Stock Pick — TikTok FinTok 热门股票推荐
-数据来源：StockTwits trending + Yahoo Finance trending + Reddit WSB
+数据来源：StockTwits trending + Yahoo Finance trending + Reddit WSB/stocks/investing + X(Twitter)
 每天早上 6:06 北京时间自动运行，生成推荐并创建 GitHub Issue
 """
 
 import os
 import re
 import sys
+import time
 from collections import Counter
 from datetime import datetime, timezone, timedelta
 
@@ -103,6 +104,76 @@ def get_trending_symbols(top_n: int = 20) -> list[str]:
         if re.match(r'^[A-Z]{1,5}$', s)
     ]
     return ranked[:top_n]
+
+
+# ── Reddit 个股讨论 ──────────────────────────────────────────────────────────
+_REDDIT_SUBS = "wallstreetbets+stocks+investing+StockMarket+options"
+
+def fetch_reddit_discussions(symbol: str, limit: int = 5) -> list[dict]:
+    """
+    从多个财经版块搜索 symbol 相关热帖，返回 title/score/comments/url。
+    无需 API key，使用 Reddit 公开 JSON 接口。
+    """
+    url = (
+        f"https://www.reddit.com/r/{_REDDIT_SUBS}/search.json"
+        f"?q={symbol}&sort=hot&restrict_sr=1&limit={limit}&t=day"
+    )
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+        posts = resp.json()["data"]["children"]
+        results = []
+        for p in posts:
+            d = p["data"]
+            results.append({
+                "title":    d.get("title", ""),
+                "score":    d.get("score", 0),
+                "comments": d.get("num_comments", 0),
+                "sub":      d.get("subreddit", ""),
+                "url":      "https://reddit.com" + d.get("permalink", ""),
+            })
+        return results
+    except Exception as e:
+        print(f"[WARN] Reddit 讨论 {symbol} 失败: {e}", file=sys.stderr)
+        return []
+
+
+# ── X (Twitter) 个股讨论 ─────────────────────────────────────────────────────
+def fetch_x_discussions(symbol: str, max_results: int = 5) -> list[dict]:
+    """
+    通过 X API v2 搜索近24h 包含 $symbol 的热门推文。
+    需要环境变量 X_BEARER_TOKEN（免费开发者账户即可获取）。
+    若未配置则跳过。
+    """
+    bearer = os.environ.get("X_BEARER_TOKEN")
+    if not bearer:
+        return []
+
+    url = "https://api.twitter.com/2/tweets/search/recent"
+    params = {
+        "query":       f"${symbol} lang:en -is:retweet",
+        "max_results": max_results,
+        "tweet.fields": "public_metrics,created_at",
+        "sort_order":  "relevancy",
+    }
+    headers = {"Authorization": f"Bearer {bearer}"}
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=15)
+        resp.raise_for_status()
+        tweets = resp.json().get("data", [])
+        results = []
+        for t in tweets:
+            m = t.get("public_metrics", {})
+            results.append({
+                "text":     t.get("text", "")[:120],
+                "likes":    m.get("like_count", 0),
+                "retweets": m.get("retweet_count", 0),
+                "replies":  m.get("reply_count", 0),
+            })
+        return results
+    except Exception as e:
+        print(f"[WARN] X 讨论 {symbol} 失败: {e}", file=sys.stderr)
+        return []
 
 
 # ── 宏观数据 ─────────────────────────────────────────────────────────────────
@@ -299,6 +370,10 @@ def analyze(symbol: str) -> dict | None:
         except Exception:
             pass
 
+        # ── Reddit & X 社交讨论 ──
+        reddit_posts = fetch_reddit_discussions(symbol, limit=5)
+        x_posts      = fetch_x_discussions(symbol, max_results=5)
+
         # ── 盘前盘后 ──
         pre_price  = info.get("preMarketPrice")
         post_price = info.get("postMarketPrice")
@@ -348,6 +423,8 @@ def analyze(symbol: str) -> dict | None:
             "inst_own":      inst_own,
             "next_earnings": next_earnings,
             "news":          news_items,
+            "reddit_posts":  reddit_posts,
+            "x_posts":       x_posts,
             # 评分
             "score":         score,
             "signal":        signal,
@@ -527,6 +604,37 @@ def build_report(results: list[dict], raw_trending: list[str], macro: dict) -> s
         if d.get("inst_own") is not None:
             io = d["inst_own"] * 100 if d["inst_own"] < 1 else d["inst_own"]
             lines.append(f"- 机构持仓比例：{io:.1f}%")
+
+        # Reddit 热门讨论
+        if d.get("reddit_posts"):
+            lines.append("\n**Reddit 热门讨论**（近24h）")
+            lines.append("| 版块 | 标题 | 👍 | 💬 |")
+            lines.append("|------|------|---:|---:|")
+            for p in d["reddit_posts"]:
+                title_trunc = p["title"][:60] + ("…" if len(p["title"]) > 60 else "")
+                lines.append(
+                    f"| r/{p['sub']} "
+                    f"| [{title_trunc}]({p['url']}) "
+                    f"| {p['score']} "
+                    f"| {p['comments']} |"
+                )
+
+        # X 热门讨论
+        if d.get("x_posts"):
+            lines.append("\n**X (Twitter) 热门提及**（近24h）")
+            lines.append("| 内容摘要 | ❤️ | 🔁 | 💬 |")
+            lines.append("|---------|---:|---:|---:|")
+            for t in d["x_posts"]:
+                text_trunc = t["text"][:80].replace("|", "｜") + ("…" if len(t["text"]) > 80 else "")
+                lines.append(
+                    f"| {text_trunc} "
+                    f"| {t['likes']} "
+                    f"| {t['retweets']} "
+                    f"| {t['replies']} |"
+                )
+        elif not os.environ.get("X_BEARER_TOKEN"):
+            lines.append("\n> 💡 配置 `X_BEARER_TOKEN` 环境变量后可展示 X (Twitter) 热门讨论")
+
         lines.append("")
 
         # 7. 操盘策略建议
