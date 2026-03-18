@@ -34,4 +34,9 @@ jobs:
           EMAIL_FROM:     ${{ secrets.EMAIL_FROM }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_TO:       ${{ secrets.EMAIL_TO }}
+          # 可选：覆盖自动检测的 SMTP 配置
+          # EMAIL_SMTP_HOST: ${{ secrets.EMAIL_SMTP_HOST }}
+          # EMAIL_SMTP_PORT: ${{ secrets.EMAIL_SMTP_PORT }}
+          # EMAIL_SMTP_MODE: ${{ secrets.EMAIL_SMTP_MODE }}  # ssl 或 tls
+          X_BEARER_TOKEN: ${{ secrets.X_BEARER_TOKEN }}
         run: python scripts/stock_recommendations.py

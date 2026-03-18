@@ -710,6 +710,31 @@ def build_report(results: list[dict], raw_trending: list[str], macro: dict) -> s
     return "\n".join(lines)
 
 
+# ── SMTP 服务器预设 ───────────────────────────────────────────────────────────
+# 根据发件人域名自动选择 SMTP，也可通过 EMAIL_SMTP_HOST / EMAIL_SMTP_PORT 覆盖
+_SMTP_PRESETS = {
+    "gmail.com":    ("smtp.gmail.com",  465, "ssl"),
+    "qq.com":       ("smtp.qq.com",     465, "ssl"),
+    "foxmail.com":  ("smtp.qq.com",     465, "ssl"),
+    "163.com":      ("smtp.163.com",    465, "ssl"),
+    "126.com":      ("smtp.126.com",    465, "ssl"),
+    "yeah.net":     ("smtp.yeah.net",   465, "ssl"),
+    "outlook.com":  ("smtp.office365.com", 587, "tls"),
+    "hotmail.com":  ("smtp.office365.com", 587, "tls"),
+    "live.com":     ("smtp.office365.com", 587, "tls"),
+}
+
+def _resolve_smtp(sender: str) -> tuple[str, int, str]:
+    """返回 (host, port, mode)，mode 为 'ssl' 或 'tls'。"""
+    host = os.environ.get("EMAIL_SMTP_HOST")
+    port = os.environ.get("EMAIL_SMTP_PORT")
+    mode = os.environ.get("EMAIL_SMTP_MODE")   # ssl / tls
+    if host and port and mode:
+        return host, int(port), mode
+    domain = sender.split("@")[-1].lower() if "@" in sender else ""
+    return _SMTP_PRESETS.get(domain, ("smtp.gmail.com", 465, "ssl"))
+
+
 # ── 发送邮件 ─────────────────────────────────────────────────────────────────
 def send_email(subject: str, body_md: str) -> None:
     import smtplib
@@ -721,9 +746,12 @@ def send_email(subject: str, body_md: str) -> None:
     receiver = os.environ.get("EMAIL_TO")
 
     if not all([sender, password, receiver]):
-        print("⚠️  未配置邮件环境变量，直接打印报告：")
+        print("⚠️  未配置邮件环境变量（EMAIL_FROM / EMAIL_PASSWORD / EMAIL_TO），直接打印报告：")
         print(body_md)
         return
+
+    host, port, mode = _resolve_smtp(sender)
+    print(f"📧 SMTP: {host}:{port} ({mode.upper()})  from={sender}  to={receiver}")
 
     html = body_md
     html = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', html)
@@ -738,12 +766,28 @@ def send_email(subject: str, body_md: str) -> None:
     msg.attach(MIMEText(html,    "html",  "utf-8"))
 
     try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-            smtp.login(sender, password)
-            smtp.sendmail(sender, receiver, msg.as_string())
+        if mode == "ssl":
+            with smtplib.SMTP_SSL(host, port, timeout=30) as smtp:
+                smtp.login(sender, password)
+                smtp.sendmail(sender, receiver, msg.as_string())
+        else:
+            with smtplib.SMTP(host, port, timeout=30) as smtp:
+                smtp.ehlo()
+                smtp.starttls()
+                smtp.login(sender, password)
+                smtp.sendmail(sender, receiver, msg.as_string())
         print(f"✅ 邮件已发送至 {receiver}")
+    except smtplib.SMTPAuthenticationError as e:
+        print(
+            f"❌ SMTP 认证失败: {e}\n"
+            f"   Gmail 用户请使用【应用专用密码】而非账户密码：\n"
+            f"   https://myaccount.google.com/apppasswords\n"
+            f"   QQ/163 用户请使用授权码而非账户密码。",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     except Exception as e:
-        print(f"❌ 邮件发送失败: {e}", file=sys.stderr)
+        print(f"❌ 邮件发送失败 ({type(e).__name__}): {e}", file=sys.stderr)
         sys.exit(1)
 
 
