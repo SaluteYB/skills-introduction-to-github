@@ -314,7 +314,7 @@ def analyze(symbol: str) -> dict | None:
         if vol_ratio > 1.5:    score += 1
         if change_day > 0:     score += 1
 
-        signal = "🟢 买入" if score >= 5 else ("🟡 持有" if score >= 3 else "🔴 观望")
+        signal = "🟢 买入" if score >= 4 else ("🟡 持有" if score >= 3 else "🔴 观望")
 
         # ── 期权数据 ──
         call_vol, put_vol, unusual_opts = 0, 0, []
